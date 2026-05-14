@@ -35,6 +35,7 @@ suite("Functional Tests", function () {
           assert.property(res.body, "stockData");
           assert.equal(res.body.stockData.stock, "AAPL");
           assert.isNumber(res.body.stockData.likes);
+          // verify like increment is persisted
           assert.isAtLeast(res.body.stockData.likes, 1);
           done();
         });
@@ -45,14 +46,27 @@ suite("Functional Tests", function () {
         .request(server)
         .get("/api/stock-prices")
         .query({ stock: "AAPL", like: true })
-        .end(function (err, res) {
-          assert.equal(res.status, 200);
-          assert.property(res.body, "stockData");
-          assert.equal(res.body.stockData.stock, "AAPL");
-          assert.isNumber(res.body.stockData.likes);
-          // ensure duplicate likes from the same IP are not counted
-          assert.isAtMost(res.body.stockData.likes, 1);
-          done();
+        .end(function (err, res1) {
+          assert.equal(res1.status, 200);
+          assert.property(res1.body, "stockData");
+          assert.equal(res1.body.stockData.stock, "AAPL");
+          assert.isNumber(res1.body.stockData.likes);
+
+          const initialLikes = res1.body.stockData.likes;
+
+          chai
+            .request(server)
+            .get("/api/stock-prices")
+            .query({ stock: "AAPL", like: true })
+            .end(function (err, res2) {
+              assert.equal(res2.status, 200);
+              assert.property(res2.body, "stockData");
+              assert.equal(res2.body.stockData.stock, "AAPL");
+              assert.isNumber(res2.body.stockData.likes);
+              // ensure repeated likes from the same client are ignored
+              assert.equal(res2.body.stockData.likes, initialLikes);
+              done();
+            });
         });
     });
 
@@ -61,18 +75,37 @@ suite("Functional Tests", function () {
         .request(server)
         .get("/api/stock-prices")
         .query({ stock: ["GOOG", "MSFT"] })
-        .end(function (err, res) {
-          assert.equal(res.status, 200);
-          assert.isArray(res.body.stockData);
-          assert.equal(res.body.stockData.length, 2);
-          assert.property(res.body.stockData[0], "rel_likes");
-          assert.property(res.body.stockData[1], "rel_likes");
-          // relative likes should always sum to zero when comparing two stocks
-          assert.equal(
-            res.body.stockData[0].rel_likes + res.body.stockData[1].rel_likes,
-            0,
-          );
-          done();
+        .end(function (err, res1) {
+          assert.equal(res1.status, 200);
+          assert.isArray(res1.body.stockData);
+          assert.equal(res1.body.stockData.length, 2);
+
+          // relative likes between two stocks should sum to zero
+          const relLikesSum1 =
+            res1.body.stockData[0].rel_likes + res1.body.stockData[1].rel_likes;
+          assert.equal(relLikesSum1, 0);
+
+          chai
+            .request(server)
+            .get("/api/stock-prices")
+            .query({ stock: ["GOOG", "MSFT"] })
+            .end(function (err, res2) {
+              assert.equal(res2.status, 200);
+              assert.isArray(res2.body.stockData);
+              assert.equal(res2.body.stockData.length, 2);
+
+              const relLikesSum2 =
+                res2.body.stockData[0].rel_likes +
+                res2.body.stockData[1].rel_likes;
+              assert.equal(relLikesSum2, 0);
+
+              // validate consistency of relative data across multiple calls
+              assert.deepEqual(
+                res1.body.stockData.map((s) => s.rel_likes),
+                res2.body.stockData.map((s) => s.rel_likes),
+              );
+              done();
+            });
         });
     });
 
@@ -81,17 +114,36 @@ suite("Functional Tests", function () {
         .request(server)
         .get("/api/stock-prices")
         .query({ stock: ["GOOG", "MSFT"], like: true })
-        .end(function (err, res) {
-          assert.equal(res.status, 200);
-          assert.isArray(res.body.stockData);
-          assert.equal(res.body.stockData.length, 2);
-          assert.property(res.body.stockData[0], "rel_likes");
-          assert.property(res.body.stockData[1], "rel_likes");
-          assert.equal(
-            res.body.stockData[0].rel_likes + res.body.stockData[1].rel_likes,
-            0,
-          );
-          done();
+        .end(function (err, res1) {
+          assert.equal(res1.status, 200);
+          assert.isArray(res1.body.stockData);
+          assert.equal(res1.body.stockData.length, 2);
+
+          const relLikesSum1 =
+            res1.body.stockData[0].rel_likes + res1.body.stockData[1].rel_likes;
+          assert.equal(relLikesSum1, 0);
+
+          chai
+            .request(server)
+            .get("/api/stock-prices")
+            .query({ stock: ["GOOG", "MSFT"], like: true })
+            .end(function (err, res2) {
+              assert.equal(res2.status, 200);
+              assert.isArray(res2.body.stockData);
+              assert.equal(res2.body.stockData.length, 2);
+
+              const relLikesSum2 =
+                res2.body.stockData[0].rel_likes +
+                res2.body.stockData[1].rel_likes;
+              assert.equal(relLikesSum2, 0);
+
+              // confirm that liking both stocks simultaneously maintains the relative difference
+              assert.deepEqual(
+                res1.body.stockData.map((s) => s.rel_likes),
+                res2.body.stockData.map((s) => s.rel_likes),
+              );
+              done();
+            });
         });
     });
   });

@@ -1,42 +1,44 @@
 "use strict";
 
-const fetch = require("node-fetch");
+const express = require("express");
 const { MongoClient } = require("mongodb");
 const crypto = require("crypto");
+const fetch = require("node-fetch");
 
 const CONNECTION_STRING = process.env.DB;
 const IP_SALT = process.env.IP_SALT || "default_salt_string";
-// regex for valid stock symbols (letters only, uppercase)
+// regex for valid stock symbols
 const STOCK_REGEX = /^[A-Z]+$/;
 
-module.exports = function (app) {
-  const client = new MongoClient(CONNECTION_STRING);
-  const dbPromise = client.connect().then((mClient) => mClient.db());
+const router = express.Router();
 
-  app.route("/api/stock-prices").get(async function (req, res) {
-    try {
-      const db = await dbPromise;
-      const collection = db.collection("stocks");
+const client = new MongoClient(CONNECTION_STRING);
+const dbPromise = client.connect().then((mClient) => mClient.db());
 
-      let { stock, like } = req.query;
-      if (!stock) return res.json({ error: "stock query required" });
+// gracefully close database connection on process termination
+process.on("SIGINT", async () => {
+  await client.close();
+  process.exit(0);
+});
 
-      // normalize stock input to an array to handle single or multiple comparisons
-      let stocks = Array.isArray(stock) ? stock : [stock];
-      let results = [];
+router.get("/stock-prices", async (req, res) => {
+  try {
+    const db = await dbPromise;
+    const collection = db.collection("stocks");
 
-      for (let s of stocks) {
-        let symbol = s.toUpperCase();
+    let { stock, like } = req.query;
+    if (!stock) return res.json({ error: "stock query required" });
 
-        // validate symbol before hitting API
+    // normalize input to handle both single strings and arrays of stock symbols
+    const stocks = Array.isArray(stock) ? stock : [stock];
+    const isLiked = like === "true";
+
+    const results = await Promise.all(
+      stocks.map(async (s) => {
+        const symbol = s.toUpperCase();
+
         if (!STOCK_REGEX.test(symbol)) {
-          results.push({
-            stock: symbol,
-            price: 0,
-            likes: 0,
-            error: "invalid symbol",
-          });
-          continue;
+          return { stock: symbol, price: 0, likes: 0, error: "invalid symbol" };
         }
 
         let priceData;
@@ -48,34 +50,23 @@ module.exports = function (app) {
           priceData = await r.json();
         } catch (err) {
           console.error(`Fetch error for ${symbol}:`, err);
-          results.push({ stock: symbol, price: 0, likes: 0 });
-          continue;
+          return { stock: symbol, price: 0, likes: 0, error: "fetch failed" };
         }
 
         if (!priceData || !priceData.latestPrice) {
-          results.push({ stock: symbol, price: 0, likes: 0 });
-          continue;
+          return { stock: symbol, price: 0, likes: 0, error: "no price data" };
         }
 
-        // extract client IP even behind proxies/load balancers
-        const ip =
-          (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
-          req.socket.remoteAddress ||
-          req.ip;
-
         // salted SHA-256 hashing for IP anonymity
+        const ip = req.ip;
         const hashedIp = crypto
           .createHash("sha256")
           .update(ip + IP_SALT)
           .digest("hex");
 
-        const isLiked = req.query.like === "true";
-
-        let update = { $setOnInsert: { stock: symbol } };
+        let update = { $setOnInsert: { stock: symbol, likes: [] } };
         if (isLiked) {
-          update.$addToSet = { likes: hashedIp }; // ensures unique likes per IP without duplicates
-        } else {
-          update.$addToSet = { likes: { $each: [] } }; // ensure field exists without modifying existing likes
+          update.$addToSet = { likes: hashedIp }; // ensures unique likes per hashed IP address
         }
 
         const doc = await collection.findOneAndUpdate(
@@ -84,40 +75,44 @@ module.exports = function (app) {
           { upsert: true, returnDocument: "after" },
         );
 
-        // handle MongoDB driver version differences for return value
+        // standardize document access across different MongoDB driver versions
         const updatedDoc = doc.value || doc;
         const likesArr = updatedDoc.likes || [];
 
-        results.push({
+        return {
           stock: symbol,
           price: parseFloat(priceData.latestPrice) || 0,
           likes: likesArr.length,
-        });
-      }
+        };
+      }),
+    );
 
-      if (results.length === 1) {
-        res.json({ stockData: results[0] });
-      } else {
-        // calculate relative likes for exactly two stocks
-        const [first, second] = results;
-        res.json({
-          stockData: [
-            {
-              stock: first.stock,
-              price: first.price,
-              rel_likes: first.likes - second.likes,
-            },
-            {
-              stock: second.stock,
-              price: second.price,
-              rel_likes: second.likes - first.likes,
-            },
-          ],
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "internal error" });
+    if (results.length === 1) {
+      res.json({ stockData: results[0] });
+    } else if (results.length === 2) {
+      const [first, second] = results;
+      // calculate relative likes for comparison when two stocks are requested
+      res.json({
+        stockData: [
+          {
+            stock: first.stock,
+            price: first.price,
+            rel_likes: first.likes - second.likes,
+          },
+          {
+            stock: second.stock,
+            price: second.price,
+            rel_likes: second.likes - first.likes,
+          },
+        ],
+      });
+    } else {
+      res.json({ stockData: results });
     }
-  });
-};
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal error" });
+  }
+});
+
+module.exports = router;

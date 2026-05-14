@@ -2,75 +2,77 @@
 
 require("dotenv").config();
 const express = require("express");
-const bodyParser = require("body-parser");
 const cors = require("cors");
 const helmet = require("helmet");
+const path = require("path");
 
 const apiRoutes = require("./routes/api.js");
-const fccTestingRoutes = require("./routes/fcctesting.js");
-const runner = require("./test-runner");
 
 const app = express();
 
-// Security headers
-app.use((req, res, next) => {
-  const csp = "default-src 'self'; script-src 'self'; style-src 'self'";
-  res.setHeader("Content-Security-Policy", csp);
-  res.setHeader("content-security-policy", csp);
-  next();
-});
-
-app.use("/public", express.static(process.cwd() + "/public"));
-
-app.use(cors({ origin: "*" })); // For FCC testing purposes only
-
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Index page (static HTML)
-app.route("/").get(function (req, res) {
-  res.sendFile(process.cwd() + "/views/index.html");
-});
-
-// App info route (for FCC testing)
-app.get("/_api/app-info", function (req, res) {
-  res.json({
-    headers: {
-      "content-security-policy":
-        "default-src 'self'; script-src 'self'; style-src 'self'",
-      "x-xss-protection": "1; mode=block",
-      "x-content-type-options": "nosniff",
-      "x-powered-by": "PHP 4.2.0",
+// configure secure HTTP headers using Helmet
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
+        styleSrc: ["'self'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      },
     },
-  });
+  }),
+);
+
+// dynamic CORS configuration based on environment-defined allowlist
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [];
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+  }),
+);
+
+app.use("/public", express.static(path.join(__dirname, "public")));
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "views", "index.html"));
 });
 
-// For FCC testing purposes
-fccTestingRoutes(app);
+// enable trust proxy for applications behind a reverse proxy
+app.set("trust proxy", true);
 
-// Routing for API
-apiRoutes(app);
+//API routing
+app.use("/api", apiRoutes);
 
-// 404 Not Found Middleware
-app.use(function (req, res, next) {
+// fallback middleware for unmatched routes
+app.use((req, res) => {
   res.status(404).type("text").send("Not Found");
 });
 
-// Start our server and tests!
-const port = process.env.PORT || 3000;
-const listener = app.listen(port, function () {
-  console.log("Your app is listening on port " + listener.address().port);
-  if (process.env.NODE_ENV === "test") {
-    console.log("Running Tests...");
-    setTimeout(function () {
-      try {
-        runner.run();
-      } catch (e) {
-        console.log("Tests are not valid:");
-        console.error(e);
-      }
-    }, 3500);
+// centralized error handling for CORS violations and internal failures
+app.use((err, req, res, next) => {
+  if (err.message === "Not allowed by CORS") {
+    res.status(403).json({ error: "CORS policy: Origin not allowed" });
+  } else {
+    console.error(err.stack);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-module.exports = app; // for testing
+// initialize server listener
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+});
+
+module.exports = app;
